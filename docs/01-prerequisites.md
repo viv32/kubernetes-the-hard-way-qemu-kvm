@@ -1,145 +1,63 @@
 # Prerequisites
 
-## Libvirt Platform
+## Virtualization platform
+This tutorial leverages libvirt and KVM/QEMU to streamline provisioning of the compute infrastructure required to bootstrap a Kubernetes cluster from the ground up. I provide instructions here for the virt-manager GUI but CLI tools can be used also in a headless environment. Instructions for this can be found in the upstream [Kubernetes The Hard Way (Libvirt KVM edition)](https://github.com/alosadagrande/kubernetes-the-hard-way-libvirt-kvm)
 
-This tutorial leverages libvirt and KVM/QEMU to streamline provisioning of the compute infrastructure required to bootstrap a Kubernetes cluster from the ground up. First step is to find a baremetal server with enough resources to run a Kubernetes cluster on virtual machines. In my case I am lucky to borrow a Dell Blade with the following resources
+In my case, I use a Lenovo ThinkCentre m920q with a fresh install of Pop!_OS. Any distro with a graphical user interface should do just fine.
 
 ```
-Host: smc-master
-Server model: PowerEdge M630	
-Cpus: 2 x Intel(R) Xeon(R) CPU E5-2630 v3 @ 2.40GHz	
-Memory: 128.0 GB	
+Host: k8s-lab
+Processor: Intel® Core™ i5-8500T CPU @ 2.10GHz × 6 
+Memory: 32.0 GiB
+Storage: 512 GB SSD	
 ```
 
-During this tutorial I am about to configure a high availability Kubernetes cluster made by the following virtual machines. Note that all will run virtualized in the baremetal server:
+During this tutorial we will configure a high availability Kubernetes cluster made  up of the following virtual machines on bare metal.
 
 |  VM Name      | Purpose    |   OS     | vCPUs | Memory | Disk  |
 | ------------- | ---------- | ---------|-------|--------|-------|
-| master00      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| master01      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| master02      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| worker00      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| worker01      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| worker02      | controller | CentOS 7 |   4   |  16 GB | 50 GB |
-| loadbalancer  | balancer   | CentOS 7 |   2   |  2 GB  | 20 GB |
+| controller-01 | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| controller-02 | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| controller-03 | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| worker-01     | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| worker-02     | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| worker-03     | controller | Ubuntu   |   2   |  4 GB  | 20 GB |
+| gateway-01    | balancer   | Ubuntu   |   1   |  2 GB  | 20 GB |
 
-- Ansible (optional)
+If you're not familiar with this level of the virtualization stack, the total vCPUs of the virtual machines exceeding what my machine has available might be confusing. Most of the time, CPU resources are not fully utilized by the virtual machines and can thus be overcommitted to other VMs. If all VMs need their full usage of the CPUs, they get slowed down and forced to share the limited compute resources. Memory can be similarly overcommitted, but if the VMs use more memory than is actually available on the host machine, things get ugly. Swap space on disk is used causing a severe performance degradation or the host OS may force the VMs to close. 
+> [!TIP]
+> My general rule of thumb: overcommit CPUs freely, avoid overcommitting memory when possible.
 
-In case you are not as lucky as me, you can still follow this tutorial with the resources you have. Basically you can decrease the resources assigned to each VM or run less workers, for instance 1 or 2 instead of 3. I suggest to run 3 masters since this is the minimal number of masters to deploy a high available Kubernetes cluster since etcd needs quorum.
+## Installing the virtualization platform onto the host
 
-At this point, we can start configuring the baremetal server. Note that these steps are required to be executed by an administrator of the baremetal server (smc-master). First, install all the virtualization packages needed to create virtual machines (VMs), virtual networks, virtual disks and all virtual devices needed to provision the cluster.
-
+Install the primitives:
 ```
-yum groupinstall "Virtualization Host"
+sudo apt-get install qemu-system qemu-system-x86 qemu-utils qemu-kvm
 ```
-
-Also I suggest tp install the libvirtd client in the baremetal server itself in case we need to troubleshoot locally any issue that can arise.
-
+Install the GUI:
 ```
-yum install libvirt-client
+sudo apt-get install virt-manager
 ```
-
 Finally, start and enable the systemd service:
-
 ```
 systemctl enable libvirtd --now
 ```
+## Creating your first VM with virt-manager.
+Launch virt-manager _(Virtual Machine Manager)_. If it cannot connect to QEMU/KVM, you may need to restart your system.
 
-## Libvirt CLI
+For simplicity and familiarity sake I use Ubuntu Server 22.04 for all the virtual machines in this tutorial. You can use something else if you prefer.
 
-In order to deploy all the virtual devices needed to run the infrastructure we can make use of the virsh command line. The virsh program is the main interface for managing virsh guest domains. The program can be used to create, pause, and shutdown domains. It can also be used to list current domains.
-
-However, I find much easier to use [kcli](https://kcli.readthedocs.io/en/master/) to deploy my virtual infrastructure.  **Kcli** is a tool meant to interact with existing virtualization providers (libvirt, kubevirt, ovirt, openstack, gcp and aws, vsphere) and to easily deploy and customize vms from cloud images. You can also interact with those vms (list, info, ssh, start, stop, delete, console, serialconsole, add/delete disk, add/delete nic,…). Futhermore, you can deploy vms using predefined profiles, several at once using plan files or entire products for which plans were already created for you.
-
-
-### Install kcli
-
-Follow the kcli [documentation](https://kcli.readthedocs.io/en/master/#installation) to install and configure all the binaries needed to manage the libvirt daemon of the baremetal server
-
-If using CentOS, which is our case
-
-```
-yum install epel-release
-yum install pip3 python3 libvirt-python libvirt-devel gcc
-pip3 install kcli
-```
-
-> It is possible to install kcli on your laptop and configure it to manage the remote baremetal server or even several libvirt hosts remotely. Take a look at the [official documentation](https://kcli.readthedocs.io/en/latest/#configuration). In this tutorial we assume installing kcli on the baremetal server in order to manage the local libvirt.
-
-
-### Configure kcli to manage the local libvirt
-
-Once you have kcli configured in your baremetal server you need to create a ssh key pair with an empty passphrase to interact with the libvirt daemon. Also this public ssh key will be automatically injected into the virtual machines you are about to create, allowing you to ssh from the baremetal server automatically once the vm is up and running.
-
-```
-# ssh-keygen -t rsa -b 2048
-Generating public/private rsa key pair.
-Enter file in which to save the key (/root/.ssh/id_rsa): 
-Enter passphrase (empty for no passphrase): 
-Enter same passphrase again: 
-Your identification has been saved in /root/.ssh/id_rsa.
-Your public key has been saved in /root/.ssh/id_rsa.pub.
-The key fingerprint is:
-SHA256:C4/ecwZji6RNyQ91q9UVs7P0HF4Jj/u0mgcco3A6jVs root@smc-master.cloud.lab.eng.bos.redhat.com
-The key's randomart image is:
-+---[RSA 2048]----+
-|                 |
-|             .o  |
-|              ++.|
-|        .... +=+.|
-|     ..oS.*ooo==o|
-|      *++=oE.+.oo|
-|     =.=o*+   + .|
-|    ..o.=.o   .+ |
-|      . .+   oo  |
-+----[SHA256]-----+
-```
-
-Establish the connection between the kcli and the local libvirt.
-
-```
-kcli create host kvm -H 127.0.0.1
-```
-
-Verify
-
-```
-+-----------+------+---------+---------+
-| Client    | Type | Enabled | Current |
-+-----------+------+---------+---------+
-| localhost | kvm  |   True  |    X    |
-+-----------+------+---------+---------+
-```
-
-Next step is create a pool where the cloud images are donwloaded and where the vms are going to be placed in the baremetal server. In this case, we use the defacto libvirt image path:
-
-```
-kcli create pool -p /var/lib/libvirt/images/ default
-Adding pool default...
-```
-
-Finally, gather all the information from the host you already installed:
-
-```
-# kcli info host
-Connection: qemu:///system
-Host: smc-master.cloud.lab.eng.bos.redhat.com
-Cpus: 32
-Vms Running: 0
-Memory Used: 0MB of 130850MB
-Storage:default Type: dir Path:/var/lib/libvirt/images Used space: 2.52GB Available space: 550.83GB
-Network: em1 Type: bridged
-Network: em2 Type: bridged
-Network: em3 Type: bridged
-Network: em4 Type: bridged
-Network: p2p1 Type: bridged
-Network: p2p2 Type: bridged
-Network: p2p3 Type: bridged
-Network: p2p4 Type: bridged
-Network: default Type: routed Cidr: 192.168.122.0/24 Dhcp: True
-```
-
-> Note that there is a default network already configured when installing libvirt called default (192.168.122.0/24)
+1. Go to `File > New Virtual Machine`
+2. Select `Local Install Media`
+3. Select your ISO
+4. Give your VM `4096 KiB Memory` and `2 CPUs`
+5. Give a `20 GiB` virtual disk.
+> [!NOTE]
+> By default, virtual disks for your virtual machines are stored at `/var/lib/libvirt/images`
+6. Name your virtual machine `controller-01`
+> [!IMPORTANT]
+> libvirt creates a default network for VMs, `192.168.122.0/24`. We will use this for our nodes.
+7. Click Finish. Your virtual machine will begin running! You should close it and power it off for now though.
 
 ## Running Commands in Parallel with tmux
 
@@ -151,6 +69,6 @@ Network: default Type: routed Cidr: 192.168.122.0/24 Dhcp: True
 
 > Enable synchronize-panes by pressing `ctrl+b` followed by `shift+:`. Next type `set synchronize-panes on` at the prompt. To disable synchronization: `set synchronize-panes off`.
 
-> There are other options, the most remarkable in my opinion is [terminator](https://terminator-gtk3.readthedocs.io/en/latest/) which I use a lot.
+There are other options, the most remarkable in my opinion is [terminator](https://terminator-gtk3.readthedocs.io/en/latest/) which I use a lot.
 
 Next: [Installing the Client Tools](02-client-tools.md)
